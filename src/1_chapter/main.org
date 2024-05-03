@@ -137,7 +137,7 @@ GBDTのライブラリの1つであるxgboostを用いてモデルを作成す�
 クロスバリデーションは、データを複数のブロックに分けて、
 うち１つを評価用のデータとし、残りを学習用のデータをすることを
 評価用のデータを入れ替えて繰り返す方法です。
-#+begin_src python :session
+#+begin_src python :session :results output
   from sklearn.metrics import log_loss, accuracy_score
   from sklearn.model_selection import KFold
 
@@ -176,4 +176,146 @@ GBDTのライブラリの1つであるxgboostを用いてモデルを作成す�
 #+end_src
 
 #+RESULTS:
-: None
+: logloss: 0.4360, accuracy: 0.8333
+
+* モデルのチューニング
+グリッドサーチ max_depthとmin_child_weightというパラメータをチューニングする
+グリッドサーチは、チューニング対象のハイパーパラメータのすべての組み合わせについて
+探索を行い、最もスコアが良いものを採用する手法
+
+#+begin_src python :session :results output
+  import itertools
+
+  # チューニング候補とするパラメータを準備する
+  param_space = {
+      "max_depth": [3, 5, 7],
+      "min_child_weight": [1.0, 2.0, 4.0]
+  }
+
+  # 探索するハイパーパラメータの組み合わせ
+  param_combinations = itertools.product(
+      param_space["max_depth"],
+      param_space["min_child_weight"]
+  )
+
+  # 各パラメータの組み合わせ、それに対するスコアを保存するリスト
+  params = []
+  scores = []
+
+  # 各パラメータの組み合わせごとに、クロスバリデーションで評価を行う
+  for max_depth, min_child_weight in param_combinations:
+
+      score_folds = []
+      # クロスバリデーションを行う
+      # 学習データを4つに分割し、うち1つをバリデーションデータをすることを、バリデーションデータを変えて繰り返す
+      kf = KFold(n_splits=4, shuffle=True, random_state=123456)
+      for tr_idx, va_idx in kf.split(train_x):
+          # 学習データを学習データとバリデーションデータに分ける
+          tr_x, va_x = train_x.iloc[tr_idx], train_x.iloc[va_idx]
+          tr_y, va_y = train_y.iloc[tr_idx], train_y.iloc[va_idx]
+
+          # モデルの学習を行う
+          model = XGBClassifier(n_estimators=20, random_state=71,
+                                max_depth=max_depth, min_child_weight=min_child_weight)
+          model.fit(tr_x, tr_y)
+
+          # バリデーションデータでスコアを計算し、保存する
+          va_pred = model.predict_proba(va_x)[:, 1]
+          logloss = log_loss(va_y, va_pred)
+          score_folds.append(logloss)
+
+      # 各foldのスコアを平均する
+      score_mean = np.mean(score_folds)
+
+      # パラメータの組み合わせ、それに対するスコアを保存する
+      params.append((max_depth, min_child_weight))
+      scores.append(score_mean)
+
+  # 最もスコアが良いものをベストなパラメータとする
+  best_idx = np.argsort(scores)[0]
+  best_param = params[best_idx]
+  print(f'max_depth: {best_param[0]}, min_child_weight: {best_param[1]}')
+
+#+end_src
+
+#+RESULTS:
+: max_depth: 3, min_child_weight: 4.0
+
+* アンサンブル
+複数のモデルを組み合わせて予測することをアンサンブルという。
+xgboostのモデルとロジスティック回帰モデルの予測値の平均をとってアンサンブルをする。
+
+#+begin_src python :session
+  from sklearn.linear_model import LogisticRegression
+
+  # xgboostモデル
+  model_xgb = XGBClassifier(n_estimators=20, random_state=71)
+  model_xgb.fit(train_x, train_y)
+  pred_xgb = model_xgb.predict_proba(test_x)[:, 1]
+
+
+  # ロジスティック回帰モデル
+
+  # ロジスティック回帰用の特徴量の作成
+  from sklearn.preprocessing import OneHotEncoder
+
+  # 元データをコピーする
+  train_x2 = train.drop(["Survived"], axis=1)
+  test_x2 = test.copy()
+
+  # 変数PassengerIdを除外する
+  train_x2 = train_x2.drop(["PassengerId"], axis=1)
+  test_x2 = test_x2.drop(["PassengerId"], axis=1)
+
+  # 変数Name, Ticket, Cabinを除外する
+  train_x2 = train_x2.drop(["Name", "Ticket", "Cabin"], axis=1)
+  test_x2 = test_x2.drop(["Name", "Ticket", "Cabin"], axis=1)
+
+  # one-hot encodingを行う
+  cat_cols = ["Sex", "Embarked", "Pclass"]
+  ohe = OneHotEncoder(categories="auto", sparse_output=False)
+  ohe.fit(train_x2[cat_cols].fillna("NA"))
+
+  # one-hot encodingのダミー変数の列名を作成する
+  ohe_columns = []
+  for i, c in enumerate(cat_cols):
+      ohe_columns += [f'{c}_{v}' for v in ohe.categories_[i]]
+
+  # one-hot encodingによる変換を行う
+  ohe_train_x2 = pd.DataFrame(
+      ohe.transform(train_x2[cat_cols].fillna("NA")),
+      columns=ohe_columns
+  )
+  ohe_test_x2 = pd.DataFrame(
+      ohe.transform(test_x2[cat_cols].fillna("NA")),
+      columns=ohe_columns
+  )
+
+  # one-hot encoding済みの変数を除外する
+  train_x2 = train_x2.drop(cat_cols, axis=1)
+  test_x2 = test_x2.drop(cat_cols, axis=1)
+
+  # one-hot encodingで変換された変数を結合する
+  train_x2 = pd.concat([train_x2, ohe_train_x2], axis=1)
+  test_x2 = pd.concat([test_x2, ohe_test_x2], axis=1)
+
+  # 数値変数の欠損値を学習データの平均を埋める
+  num_cols = ["Age", "SibSp", "Parch", "Fare"]
+  for col in num_cols:
+      train_x2.fillna({col: train_x2[col].mean()}, inplace=True)
+      test_x2.fillna({col: train_x2[col].mean()}, inplace=True)
+
+  # 変数Fareを対数変換する
+  train_x2["Fare"] = np.log1p(train_x2["Fare"])
+  test_x2["Fare"] = np.log1p(test_x2["Fare"])
+
+  model_lr = LogisticRegression(solver="lbfgs", max_iter=300)
+  model_lr.fit(train_x2, train_y)
+  pred_lr = model_lr.predict_proba(test_x2)[:, 1]
+
+  # 予測値の加重平均をとる
+  pred = pred_xgb * 0.8 + pred_lr * 0.2
+  pred_label = np.where(pred > 0.5, 1, 0)
+#+end_src
+
+#+RESULTS:
