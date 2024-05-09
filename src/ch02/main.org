@@ -57,3 +57,9 @@ $RMSE=\sqrt{\frac{1}{N} \sum_{i=1}^{N} (y_{i} - \hat{y_{i}})^{2}}$
 
 #+RESULTS:
 : 0.5531726674375732
+
+*** RMSLE (Root Mean Squared Logarithmic Error)
+$RMSLE=\sqrt{\frac{1}{N} \sum_{i=1}^{N} (\log{(1+y_{i})} - \log{(1+\hat{y_{i}})})^{2}}$
+RMSEの最小化はRMSLEの最小化
+比率に着目している
+scikit-learnのmetricsモジュールのmean_squared_log_errorを用いて計算できる
